@@ -32,10 +32,11 @@ def main():
     ap.add_argument("--maps", default=None, help="folder of .osu files to also evaluate on in the simulator")
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--eval-episodes", type=int, default=4)
+    ap.add_argument("--device", default="cpu", help="cpu (recommended), xpu or cuda")
     a = ap.parse_args()
 
     cfg = BotConfig()
-    dev = pick_device()
+    dev = torch.device(a.device)
     print(f"[bc] device {dev} ({device_name(dev)})")
     d = np.load(a.data)
     assert int(d["n_objs"]) == cfg.policy.n_objs and int(d["hz"]) == cfg.policy.hz, "dataset/config mismatch - rebuild it"
