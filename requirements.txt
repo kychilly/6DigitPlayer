@@ -1,0 +1,6 @@
+numpy>=1.26
+opencv-python>=4.9
+mss>=9.0
+torch>=2.3
+soundcard>=0.4.3     # optional: system-audio loopback for beat/onset listening
+# (replay parsing uses only the standard library: lzma, struct)
