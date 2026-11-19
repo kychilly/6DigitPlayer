@@ -236,6 +236,12 @@ def file_md5(p) -> str:
     return hashlib.md5(Path(p).read_bytes()).hexdigest()
 
 
+def reward_signature(cfg: BotConfig) -> str:
+    """Changes whenever the reward settings change -> cached replay scores are recomputed."""
+    import hashlib
+    return hashlib.md5(repr(sorted(vars(cfg.reward).items())).encode()).hexdigest()[:12]
+
+
 def replay_to_samples(bm, rep, cfg: BotConfig):
     """A replay (anyone's) -> (obs, act, reward) on the policy's 120 Hz grid, scored with the real rules."""
     from replay_data import judge_replay, build_samples
@@ -463,7 +469,8 @@ class Worker:
         cp = CACHE_DIR / f"{h}.npz"
         if cp.exists():
             d = np.load(cp)
-            if int(d["n_objs"]) == self.cfg.policy.n_objs and int(d["hz"]) == self.cfg.policy.hz:
+            if (int(d["n_objs"]) == self.cfg.policy.n_objs and int(d["hz"]) == self.cfg.policy.hz
+                    and "rsig" in d.files and str(d["rsig"]) == reward_signature(self.cfg)):
                 self._lib_acc[h] = float(d["acc"])
                 ep = downsample(d["obs"], d["act"], d["rew"])
                 self._lib_mem[h] = ep
@@ -482,7 +489,8 @@ class Worker:
         obs, act, rew, diag = replay_to_samples(bm, rep, self.cfg)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cp, obs=obs, act=act, rew=rew, acc=np.float32(diag["acc"]),
-                            n_objs=self.cfg.policy.n_objs, hz=self.cfg.policy.hz)
+                            n_objs=self.cfg.policy.n_objs, hz=self.cfg.policy.hz,
+                            rsig=np.array(reward_signature(self.cfg)))
         c = diag["counts"]
         self.log(f"library: + {p.name[:60]}  ({diag['acc'] * 100:.1f}%  {c['300']}/{c['100']}/{c['50']}/{c['miss']})")
         self._lib_acc[h] = float(diag["acc"])

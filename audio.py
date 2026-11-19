@@ -30,6 +30,13 @@ class AudioListener(threading.Thread):
         c = self.cfg
         try:
             import soundcard as sc
+            # soundcard installs its own "always show" warning filter when it loads, overriding ours -> re-apply
+            warnings.filterwarnings("ignore", message="data discontinuity in recording")
+            try:
+                from soundcard.mediafoundation import SoundcardRuntimeWarning
+                warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning)
+            except Exception:  # noqa
+                pass
             spk = sc.default_speaker()
             mic = sc.get_microphone(id=str(spk.name), include_loopback=True)
         except Exception as e:  # noqa
