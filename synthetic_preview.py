@@ -1,8 +1,20 @@
-"""Writes synthetic_preview.png so you can eyeball the training data generator."""
+"""Writes synthetic_preview.png so you can eyeball the training data generator.
+    python synthetic_preview.py                                   # generic frames
+    python synthetic_preview.py --skin "C:/.../osu!/Skins/<skin>"  # frames drawn with your skin
+Crosses mark the labels: green circle, yellow slider head, magenta spinner, cyan slider ball."""
+import argparse
 import cv2
 import numpy as np
 from synthetic import SyntheticRenderer
-r = SyntheticRenderer()
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--skin", default=None)
+a = ap.parse_args()
+if a.skin:
+    from skin_synthetic import SkinRenderer
+    r = SkinRenderer(a.skin)
+else:
+    r = SyntheticRenderer()
 cols = [(0, 255, 0), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
 tiles = []
 for i in range(12):

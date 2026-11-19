@@ -30,6 +30,11 @@ class KillSwitch(threading.Thread):
         self._release_everything()
         time.sleep(0.005)                  # cover a key-down that was mid-flight
         self._release_everything()
+        for cb in list(getattr(self.shared, "on_kill", [])):   # e.g. save the current play for learning
+            try:
+                cb()
+            except Exception:  # noqa
+                pass
         print("\n[KILL] ` (backtick) pressed - bot shut down.", flush=True)
         sys.stdout.flush()
         os._exit(0)                        # hard exit: nothing can keep running

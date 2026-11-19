@@ -22,6 +22,9 @@ class SharedState:
         self.quit = False
         self.diff = None     # (ar, od, map name) of the map being played, from diff_detect.DiffWatcher
         self.diff_ver = 0
+        self.map_end_ver = 0     # bumped by map_end.MapEndWatcher the moment a map is over
+        self.map_end_reason = ""
+        self.on_kill = []        # callbacks run by the kill switch before the process exits
 
     def set_frame(self, frame, ts):
         with self.lock:

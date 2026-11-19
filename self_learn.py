@@ -101,7 +101,6 @@ class ReplayLearning:
             self.reloader.stop()
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.stdin.close()
-                self.proc.terminate()
+                self.proc.stdin.close()      # the worker finishes learning from the last play, then exits by itself
             except Exception:  # noqa
                 pass

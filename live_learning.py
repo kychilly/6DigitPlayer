@@ -51,7 +51,8 @@ class EpisodeRecorder:
     def __init__(self, cfg, out_dir: str | Path = EPISODE_DIR, min_steps: int = 600, log=print):
         self.cfg, self.out_dir, self.min_steps, self.log = cfg, Path(out_dir), min_steps, log
 
-    def finish_episode(self, buf: ExperienceBuffer, acc: float, counts: dict, meta: dict | None = None):
+    def finish_episode(self, buf: ExperienceBuffer, acc: float, counts: dict, meta: dict | None = None,
+                       sync: bool = False):
         if len(buf) < self.min_steps:
             self.log(f"learn: episode too short ({len(buf)} steps), not saved")
             return None
@@ -73,7 +74,10 @@ class EpisodeRecorder:
             tmp = path.with_suffix(".tmp.npz")
             np.savez_compressed(tmp, **data)
             os.replace(tmp, path)
-        threading.Thread(target=write, daemon=True).start()
+        if sync:
+            write()                        # kill switch / shutdown: the process exits right after this
+        else:
+            threading.Thread(target=write, daemon=True).start()
         self.log(f"learn: saved episode ({len(buf)} steps) -> worker will score it with the replay")
         return path
 
@@ -91,7 +95,7 @@ class OnlineLearner:
         self.best_acc = -1.0
         self.episodes = 0
 
-    def finish_episode(self, buf: ExperienceBuffer, acc: float, counts: dict, meta: dict | None = None):
+    def finish_episode(self, buf: ExperienceBuffer, acc: float, counts: dict, meta: dict | None = None, **_):
         from policy import save_policy
         if len(buf) < self.min_steps:
             self.log(f"learn: episode too short ({len(buf)} steps), skipped")

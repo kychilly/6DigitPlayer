@@ -101,6 +101,12 @@ def main():
         diff_watch.start()
 
     learning = bool(a.policy) and not a.no_learn and not a.dry_run
+    map_end = None
+    if learning:
+        from map_end import MapEndWatcher
+        local = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "osu!"
+        map_end = MapEndWatcher(shared, a.replay_dirs or [str(local / "Replays"), str(local / "Data" / "r")])
+        map_end.start()
     if a.policy:
         from policy import PolicyRunner
         from live_learning import EpisodeRecorder
@@ -136,11 +142,14 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        controller.stop()            # saves the play in progress first
         if rl:
-            rl.stop()
+            rl.stop()                # the learning process finishes that play, then exits on its own
         if diff_watch:
             diff_watch.stop()
-        controller.stop(); perception.stop(); capture.stop()
+        if map_end:
+            map_end.stop()
+        perception.stop(); capture.stop()
         if audio:
             audio.stop()
         time.sleep(0.1)

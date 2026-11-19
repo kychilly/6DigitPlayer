@@ -763,13 +763,18 @@ def stats():
               "  (different maps differ in difficulty, so compare over many plays)")
 
 
-def _exit_when_parent_dies():
+PARENT_GONE = threading.Event()
+
+
+def _watch_parent():
+    """run_bot.py holds our stdin open; when the bot closes (even via the kill switch) the pipe closes.
+    We then finish learning from any play still waiting, and exit."""
     try:
         while sys.stdin.buffer.read(1024):
             pass
     except Exception:  # noqa
         pass
-    os._exit(0)
+    PARENT_GONE.set()
 
 
 def main():
@@ -814,7 +819,7 @@ def main():
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
     if a.exit_on_stdin_eof:
-        threading.Thread(target=_exit_when_parent_dies, daemon=True).start()
+        threading.Thread(target=_watch_parent, daemon=True).start()
     if a.rollback:
         return rollback(a.policy)
     if a.stats:
@@ -843,9 +848,18 @@ def main():
     except Exception as e:  # noqa
         import traceback
         w.log(f"study failed: {type(e).__name__}: {e}"); traceback.print_exc()
+    gone_at = None
     try:
         while True:
             w.run_once(a.wait_replay)
+            if PARENT_GONE.is_set():
+                if gone_at is None:
+                    gone_at = time.time()
+                    if w.pending():
+                        w.log("bot closed - finishing the learning from the last play before exiting...")
+                if not w.pending() or time.time() - gone_at > a.wait_replay + 90:
+                    w.log("learning finished - worker exiting (the next run_bot loads the improved policy)")
+                    return
             time.sleep(2.0)
     except KeyboardInterrupt:
         w.log("stopped")

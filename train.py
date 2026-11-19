@@ -1,7 +1,11 @@
 """Train the detector.  Examples:
     python train.py                              # synthetic data only
+    python train.py --skin "C:/Users/you/AppData/Local/osu!/Skins/<your skin>" --resume checkpoints/detector.pt \
+                    --epochs 15 --out checkpoints/detector_skin.pt     # learn YOUR skin's circles
     python train.py --epochs 40 --real-dir data/real   # mix in your own labelled frames
-Real-data format: data/real/foo.png + foo.json with
+    python train.py --real-dir data/real --no-synthetic --resume checkpoints/detector.pt --epochs 15 \
+                    --out checkpoints/detector_real.pt      # ONLY real frames (record them with record_frames.py)
+Real-data format: data/real/**/foo.png|jpg + foo.json with
     {"objects":[{"cls":0,"x":0.42,"y":0.51,"progress":0.7,"radius":0.03}, ...]}
   x,y,radius are normalised by image width/height/width; cls: 0 circle,1 slider head,2 spinner,3 slider ball.
 """
@@ -26,24 +30,31 @@ def to_tensor(img_bgr):
 
 
 class SyntheticDataset(Dataset):
-    def __init__(self, n, mc: ModelConfig, seed=None):
-        self.n, self.seed = n, seed
+    def __init__(self, n, mc: ModelConfig, seed=None, skin=None, skin_frac=0.7):
+        self.n, self.seed, self.skin_frac = n, seed, skin_frac
         self.r = SyntheticRenderer(mc.input_w, mc.input_h, mc.stride, mc.num_classes)
+        self.sr = None
+        if skin:
+            from skin_synthetic import SkinRenderer
+            self.sr = SkinRenderer(skin, mc.input_w, mc.input_h, mc.stride, mc.num_classes)
 
     def __len__(self):
         return self.n
 
     def __getitem__(self, i):
         rng = np.random.default_rng(None if self.seed is None else self.seed + i)
-        img, objs = self.r.render(rng)
+        use_skin = self.sr is not None and rng.random() < self.skin_frac
+        img, objs = (self.sr if use_skin else self.r).render(rng)
         h, r, m = self.r.build_targets(objs)
         return to_tensor(img), torch.from_numpy(h), torch.from_numpy(r), torch.from_numpy(m)
 
 
 class RealDataset(Dataset):
-    def __init__(self, folder, mc: ModelConfig, repeat=20):
-        self.items = [(p, p.with_suffix(".json")) for p in sorted(Path(folder).glob("*.png")) if p.with_suffix(".json").exists()]
-        self.mc, self.repeat = mc, repeat
+    def __init__(self, folder, mc: ModelConfig, repeat=20, items=None, augment=True):
+        if items is None:
+            items = [(p, p.with_suffix(".json")) for ext in ("*.png", "*.jpg")
+                     for p in sorted(Path(folder).rglob(ext)) if p.with_suffix(".json").exists()]
+        self.items, self.mc, self.repeat, self.augment = items, mc, repeat, augment
         self.r = SyntheticRenderer(mc.input_w, mc.input_h, mc.stride, mc.num_classes)
         print(f"[data] {len(self.items)} real labelled frames")
 
@@ -52,10 +63,12 @@ class RealDataset(Dataset):
 
     def __getitem__(self, i):
         png, js = self.items[i % len(self.items)]
-        img = cv2.resize(cv2.imread(str(png)), (self.mc.input_w, self.mc.input_h), interpolation=cv2.INTER_AREA)
+        raw = cv2.imdecode(np.fromfile(str(png), dtype=np.uint8), cv2.IMREAD_COLOR)    # works with non-ASCII paths
+        img = cv2.resize(raw, (self.mc.input_w, self.mc.input_h), interpolation=cv2.INTER_AREA)
         objs = [GTObject(o["cls"], o["x"] * self.mc.input_w, o["y"] * self.mc.input_h, o["progress"], o["radius"] * self.mc.input_w)
                 for o in json.load(open(js))["objects"]]
-        img = np.clip(img.astype(np.float32) * np.random.uniform(0.85, 1.15), 0, 255).astype(np.uint8)  # light jitter
+        if self.augment:                                                                 # light brightness jitter
+            img = np.clip(img.astype(np.float32) * np.random.uniform(0.85, 1.15), 0, 255).astype(np.uint8)
         h, r, m = self.r.build_targets(objs)
         return to_tensor(img), torch.from_numpy(h), torch.from_numpy(r), torch.from_numpy(m)
 
@@ -98,6 +111,9 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--real-dir", default=None)
+    ap.add_argument("--skin", default=None, help="your osu! skin folder: train on frames drawn with its sprites")
+    ap.add_argument("--skin-frac", type=float, default=0.7, help="share of training frames drawn with --skin")
+    ap.add_argument("--no-synthetic", action="store_true", help="train ONLY on real frames from --real-dir")
     ap.add_argument("--resume", default=None)
     ap.add_argument("--out", default="checkpoints/detector.pt")
     a = ap.parse_args()
@@ -110,12 +126,33 @@ def main():
     if a.resume:
         model.load_state_dict(torch.load(a.resume, map_location=dev)["model"])
 
-    train_sets = [SyntheticDataset(a.steps * a.batch, mc)]
-    if a.real_dir:
-        train_sets.append(RealDataset(a.real_dir, mc))
+    if a.skin:
+        from skin_synthetic import Skin
+        sk = Skin(a.skin)
+        print(f"[train] skin: {a.skin} ({len(sk.combo_colours)} combo colours, "
+              f"numbers {'found' if any(x is not None for x in sk.digits) else 'NOT found'})", flush=True)
+    if a.no_synthetic:
+        if not a.real_dir:
+            raise SystemExit("--no-synthetic needs --real-dir (record frames with record_frames.py)")
+        allr = RealDataset(a.real_dir, mc, repeat=1).items
+        if len(allr) < 50:
+            raise SystemExit(f"only {len(allr)} real frames in {a.real_dir} - record a few maps first")
+        folders = sorted({p.parent for p, _ in allr})          # hold out whole plays, not neighbouring frames
+        val_f = set(folders[::10]) if len(folders) >= 5 else {folders[-1]}
+        tr = [x for x in allr if x[0].parent not in val_f] or allr
+        va = [x for x in allr if x[0].parent in val_f][:512]
+        rep_n = max(1, (a.steps * a.batch) // max(len(tr), 1))           # fill an epoch of --steps batches
+        train_sets = [RealDataset(None, mc, repeat=rep_n, items=tr)]
+        val_set = RealDataset(None, mc, repeat=1, items=va, augment=False)
+        print(f"[train] REAL frames only: {len(tr)} train / {len(va)} validation (held-out plays)", flush=True)
+    else:
+        train_sets = [SyntheticDataset(a.steps * a.batch, mc, skin=a.skin, skin_frac=a.skin_frac)]
+        if a.real_dir:
+            train_sets.append(RealDataset(a.real_dir, mc))
+        val_set = SyntheticDataset(256, mc, seed=12345, skin=a.skin, skin_frac=a.skin_frac)
     train_dl = DataLoader(ConcatDataset(train_sets), batch_size=a.batch, shuffle=True, num_workers=a.workers,
                           drop_last=True, persistent_workers=a.workers > 0)
-    val_dl = DataLoader(SyntheticDataset(256, mc, seed=12345), batch_size=32, num_workers=0)
+    val_dl = DataLoader(val_set, batch_size=32, num_workers=0)
 
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=a.epochs * len(train_dl))

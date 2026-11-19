@@ -52,6 +52,9 @@ class PolicyController(Controller):
         self._last_now = 0.0
         self._paused_at = None        # map paused (break section / no notes) - the episode stays open for a while
         self._paused_ver = -1
+        self._map_end_seen = getattr(shared, "map_end_ver", 0)
+        if hasattr(shared, "on_kill"):
+            shared.on_kill.append(self.emergency_save)
 
     # ------------------------------------------------------------------ difficulty (AR / OD) for the current map
     def set_difficulty(self, ar: float, od: float, name: str = ""):
@@ -80,6 +83,13 @@ class PolicyController(Controller):
         armed = self.shared.armed
         self._last_now = now
         self._sync_difficulty()
+        mev = getattr(self.shared, "map_end_ver", 0)
+        if mev != self._map_end_seen:                  # results screen / left the map: the play is over NOW
+            self._map_end_seen = mev
+            if self.active or self._paused_at is not None:
+                if self.active:
+                    self._disengage(getattr(self.shared, "map_end_reason", "") or "map over")
+                self.flush_episode()
         if self._paused_at is not None and (now - self._paused_at > self.pc.episode_gap
                                             or self._paused_ver != self._diff_ver):
             self.flush_episode()                       # the map is really over (or a new one started)
@@ -138,7 +148,7 @@ class PolicyController(Controller):
         self.active = False
         self._paused_at, self._paused_ver = self._last_now, self._diff_ver
 
-    def flush_episode(self):
+    def flush_episode(self, sync: bool = False):
         """The map is over: report it and hand the recording to the learner."""
         self._paused_at = None
         if not len(self.buf) and not any(self.judge.counts.values()):
@@ -149,18 +159,24 @@ class PolicyController(Controller):
         if self.learner is not None:
             try:
                 self.learner.finish_episode(self.buf, acc, c, {"ar": self.cfg.game.ar, "od": self.cfg.game.od,
-                                                               "map": self.map_name})
+                                                               "map": self.map_name}, sync=sync)
             except Exception:
                 traceback.print_exc()
         self.buf = ExperienceBuffer()
         self.judge.reset(); self.shaper.reset()
         self._n_steps = 0
 
+    def emergency_save(self):
+        """Kill switch / shutdown: save the play in progress (synchronously - the process is about to exit)."""
+        if self.active:
+            self.active = False
+            self._paused_at = self._last_now
+        if self._paused_at is not None:
+            self.flush_episode(sync=True)
+
     def stop(self):
         try:
-            if self.active:
-                self._end_episode()
-            self.flush_episode()                       # save the last map on a normal shutdown
+            self.emergency_save()                      # save the last map on a normal shutdown
         except Exception:
             traceback.print_exc()
         super().stop()
