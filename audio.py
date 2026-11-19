@@ -4,9 +4,13 @@ estimated hit time to the music's rhythm."""
 from __future__ import annotations
 import threading
 import time
+import warnings
 from collections import deque
 import numpy as np
 from config import AudioConfig
+
+# soundcard warns every time Windows' loopback capture skips a few samples; harmless for beat detection
+warnings.filterwarnings("ignore", message="data discontinuity in recording")
 
 
 class AudioListener(threading.Thread):

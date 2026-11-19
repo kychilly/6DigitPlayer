@@ -45,6 +45,14 @@ class ObjectTracker:
         self._ball: Optional[BallState] = None
         self.lock = threading.RLock()
 
+    def set_preempt(self, preempt: float):
+        """New map with a different AR: approach-ring progress now maps to a different time-to-hit.
+        Objects tracked under the old AR are dropped (their hit-time estimates would be wrong)."""
+        with self.lock:
+            if abs(preempt - self.preempt) > 1e-6:
+                self.preempt = preempt
+                self._objs.clear()
+
     # ------------------------------------------------------------------ perception side
     def update(self, dets, t_frame: float, scale: float, frame_h: float = None):
         """dets are in model-input pixels; `scale` converts them to frame pixels."""

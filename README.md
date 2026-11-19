@@ -33,17 +33,31 @@ python train_rl.py --init checkpoints/policy.pt --bc-data data/replays.npz --ite
 python train_rl.py --init checkpoints/policy.pt --maps "<osu!>/Songs" --iters 500   # real maps too
                                                                   -> checkpoints/policy_rl.pt
 
-# 3. PLAY the real game (starts disarmed; F8 arm, ESC kill)
-python run_bot.py --policy checkpoints/policy_rl.pt --ar 9 --od 8
-python run_bot.py --policy checkpoints/policy_rl.pt --learn --bc-data data/replays.npz   # keeps learning after every map
+# 3. PLAY the real game - learning from the REPLAY LIBRARY + after every map (F8 arm, ` backtick = kill)
+#    replay_library/          <- put your own GOOD plays (.osr) here
+#    replay_library/bot_plays <- the bot's own plays are added automatically (max 300 replays in total)
+python run_bot.py --policy checkpoints/policy.pt              # studies the library, plays, learns after every map
+python run_bot.py --policy checkpoints/policy.pt --no-learn   # play only, policy frozen
+python rl_worker.py --study                                   # study the library now without osu!
+python rl_worker.py --stats                                   # per-map log: is it improving?
+python rl_worker.py --rollback                                # undo the last update
 ```
 Check it works without osu!/replays: `python selftest.py` and `python live_selftest.py --policy <ckpt>`.
 
 ## Things to know
 * Replays with DT/HT/Relax/Auto are skipped. HR/EZ are handled. Use good plays (`--min-acc`); the bot copies who it watches.
 * Beatmaps are used ONLY in training/simulation. The live bot sees what the tracker sees.
-* **Live reward is self-judged** from the detector's timing + cursor position, so it shares the detector's error
-  (in tests it was 3-7% optimistic). Simulator training has exact judgement; live learning is for fine-tuning.
+* **Learning after every map (rl_worker.py):** the bot records every decision while playing; when the map ends,
+  the worker finds the replay osu! saved, lines it up with the recording, re-scores every step with osu!'s real
+  judgement on the real beatmap (the same reward as the simulator), runs a PPO update and writes the policy; the
+  bot hot-reloads it before the next map. No replay (failed/quit map, lazer) -> falls back to the bot's own live
+  judgement. Play with NoFail so every map produces a replay. Log: data/rl_log.csv, backups: checkpoints/history/.
+* **Replay library (offline RL):** every replay in replay_library/ (yours first, then the bot's own plays; max 300)
+  is scored with the same reward and studied with advantage-weighted regression: moments that scored better than
+  expected are copied strongly, worse ones mostly ignored. A long study runs when the library changes (before the
+  first map); a short refresher runs after every map. Only put GOOD plays in replay_library/ - the bot copies them.
+* AR / OD are read from the osu! window title + Songs folder automatically (--ar/--od are only the fallback).
+  Mods aren't visible in the title, so HR/EZ/DT maps get the wrong AR/OD (the worker warns after the map).
 * Playfield mapping assumes osu!'s 80%-of-height playfield. Check the green box in the viewer; adjust `--pf-shift`.
 * The detector is still trained on synthetic frames; retrain with your skin (`train.py --real-dir`) before live play.
 * Only run offline / on your own client. osu! forbids automation on official servers.

@@ -63,7 +63,7 @@ class Visualizer:
         if armed:
             line("ARMED - " + ("waiting for osu! map" if mode == "STANDBY" else "CONTROLLING MOUSE"), (0, 0, 255))
         else:
-            line("DISARMED  [F8 / SPACE] arm   [ESC] kill", (0, 200, 255))
+            line("DISARMED  [F8 / SPACE] arm   [`] kill", (0, 200, 255))
         line(f"mode {mode}  cap {stats['capture_fps']:.0f}fps  net {stats['perception_fps']:.0f}fps ({stats['infer_ms']:.1f}ms)")
         proc, title = self.shared.fg
         line(f"focus: {proc or '?'} | {title[:34]}", (170, 170, 170))

@@ -161,6 +161,7 @@ class PolicyConfig:
     key_temp: float = 1.0           # >1 = sloppier / more random taps at play time
     move_noise_scale: float = 1.0   # scale on the learned aim noise at play time
     # perception noise injected in sim / BC so the policy tolerates real detector noise
+    episode_gap: float = 30.0       # s without notes before a map counts as over (longer = a break inside the map)
     ttl_noise: float = 0.008        # s
     pos_noise: float = 3.0          # osu!px
 

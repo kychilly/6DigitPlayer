@@ -1,4 +1,7 @@
-"""STEP 1 of self-improvement: learn from the bot's OWN finished plays.
+"""(SUPERSEDED by rl_worker.py, which run_bot.py --policy now uses: true PPO reinforcement learning after every map.
+ Don't run this at the same time as the bot - both would edit the policy.)
+
+OLD: reward-weighted imitation of the bot's OWN finished plays.
 
     python learn_from_play.py --watch        # leave running next to the bot; learns after every finished map
     python learn_from_play.py --latest       # learn from the newest replay once

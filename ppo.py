@@ -28,12 +28,14 @@ def compute_gae(rew, val, done, last_val, gamma, lam):
 
 class PPOLearner:
     def __init__(self, model: ActorCritic, cfg: BotConfig, device, lr=3e-5, bc_data=None, bc_coef=0.5,
-                 clip=0.2, epochs=4, minibatch=2048, ent_coef=0.0, vf_coef=0.5, lam=0.95, critic_warmup=0):
+                 clip=0.2, epochs=4, minibatch=2048, ent_coef=0.0, vf_coef=0.5, lam=0.95, critic_warmup=0,
+                 target_kl=None):
         self.m, self.cfg, self.dev = model, cfg, device
         self.gamma, self.lam = cfg.reward.gamma, lam
         self.clip, self.epochs, self.mb, self.ent, self.vf = clip, epochs, minibatch, ent_coef, vf_coef
         self.opt = torch.optim.Adam(model.parameters(), lr=lr)
         self.bc_coef, self.warm, self.iters = bc_coef, critic_warmup, 0
+        self.target_kl = target_kl          # stop an update early once the policy has moved this far
         self.bc = None
         if bc_data is not None and bc_coef > 0:
             d = np.load(bc_data)
@@ -52,7 +54,10 @@ class PPOLearner:
         stats = {"pg": 0.0, "vf": 0.0, "kl": 0.0, "bc": 0.0, "ent": 0.0}
         cnt = 0
         self.m.train()
+        stopped = False
         for _ in range(self.epochs):
+            if stopped:
+                break
             perm = torch.randperm(n, device=dev)
             for s in range(0, n, self.mb):
                 i = perm[s:s + self.mb]
@@ -73,9 +78,26 @@ class PPOLearner:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.m.parameters(), 0.5)
                 self.opt.step()
-                stats["pg"] += pg.item(); stats["vf"] += vf.item(); stats["bc"] += float(bcl)
-                stats["kl"] += (lp0[i] - lp).mean().item(); stats["ent"] += ent.mean().item()
+                stats["pg"] += pg.item(); stats["vf"] += vf.item(); stats["bc"] += float(bcl.detach())
+                kl = (lp0[i] - lp).mean().item()
+                stats["kl"] += kl; stats["ent"] += ent.mean().item()
                 cnt += 1
+                if self.target_kl is not None and actor_on and kl > 1.5 * self.target_kl:
+                    stopped = True          # policy moved enough for one batch of data
+                    break
         self.iters += 1
         self.m.eval()
-        return {k: v / max(cnt, 1) for k, v in stats.items()}
+        out = {k: v / max(cnt, 1) for k, v in stats.items()}
+        out["actor_on"], out["minibatches"], out["early_stop"] = actor_on, cnt, stopped
+        return out
+
+    # ------------------------------------------------------------------ persistence (optimizer + counters)
+    def state_dict(self) -> dict:
+        return {"opt": self.opt.state_dict(), "iters": self.iters}
+
+    def load_state_dict(self, st: dict):
+        self.iters = int(st.get("iters", 0))
+        try:
+            self.opt.load_state_dict(st["opt"])
+        except Exception:                       # architecture changed -> fresh optimizer is fine
+            pass

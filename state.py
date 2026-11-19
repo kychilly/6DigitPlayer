@@ -20,6 +20,8 @@ class SharedState:
         self.armed = False
         self.fg = ('', '')   # (process, window title) of the focused window
         self.quit = False
+        self.diff = None     # (ar, od, map name) of the map being played, from diff_detect.DiffWatcher
+        self.diff_ver = 0
 
     def set_frame(self, frame, ts):
         with self.lock:

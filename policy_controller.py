@@ -5,9 +5,10 @@ tracker only, never a map - asks the network for [aim velocity, key0, key1], and
 At 1 kHz the cursor follows that velocity with a hand-acceleration limit plus physiological
 tremor, so the motion stays smooth and human.
 
-With a learner attached (--learn) it also JUDGES its own taps exactly like osu! would (300/100/50/
-miss from the tracker's timing + cursor position), turns that into the reward in config.RewardConfig,
-and PPO-updates the policy after every map.
+It also JUDGES its own taps the way osu! would (300/100/50/miss from the tracker's timing + cursor
+position) for the on-screen stats. With a learner attached it records every decision (observation, action,
+log-prob, value, time, key presses); at the end of the map the episode is handed to the learner
+(EpisodeRecorder -> rl_worker.py), which re-scores it with osu!'s real judgement from the replay and runs PPO.
 """
 from __future__ import annotations
 import math
@@ -17,7 +18,7 @@ import numpy as np
 
 from config import BotConfig, ar_to_preempt
 from controller import Controller, Mode
-from judge import LiveJudge, RewardShaper, Event
+from judge import LiveJudge, RewardShaper, Event, hit_windows
 from live_learning import ExperienceBuffer
 from obs import VisObj, VisBall, SPINNER, encode, sort_visible
 from playfield import PlayfieldMap
@@ -46,10 +47,42 @@ class PolicyController(Controller):
         self.circle_r = 32.0
         self._spin_ang = None
         self._n_steps = 0
+        self._diff_ver = -1
+        self.map_name = ""
+        self._last_now = 0.0
+        self._paused_at = None        # map paused (break section / no notes) - the episode stays open for a while
+        self._paused_ver = -1
+
+    # ------------------------------------------------------------------ difficulty (AR / OD) for the current map
+    def set_difficulty(self, ar: float, od: float, name: str = ""):
+        """Called when the map's AR / OD are known (auto-detected from the osu! window title, or --ar/--od)."""
+        self.cfg.game.ar, self.cfg.game.od = ar, od
+        self.preempt = ar_to_preempt(ar)
+        self.judge.od = od
+        self.judge.w300, self.judge.w100, self.judge.w50 = hit_windows(od)
+        self.shaper.od = od
+        self.shaper.w300, self.shaper.w100, self.shaper.w50 = hit_windows(od)
+        if hasattr(self.tracker, "set_preempt"):
+            self.tracker.set_preempt(self.preempt)
+        self.map_name = name
+
+    def _sync_difficulty(self):
+        d = getattr(self.shared, "diff", None)
+        ver = getattr(self.shared, "diff_ver", 0)
+        if d is not None and ver != self._diff_ver:
+            self._diff_ver = ver
+            ar, od, name = d
+            self.set_difficulty(ar, od, name)
+            self.shared.log(f"map: {name[:40]} | AR {ar:.1f} OD {od:.1f}")
 
     # ------------------------------------------------------------------ main step (1 kHz)
     def step(self, now: float, dt: float):
         armed = self.shared.armed
+        self._last_now = now
+        self._sync_difficulty()
+        if self._paused_at is not None and (now - self._paused_at > self.pc.episode_gap
+                                            or self._paused_ver != self._diff_ver):
+            self.flush_episode()                       # the map is really over (or a new one started)
         if not self._update_gate(now, armed):
             with self.shared.lock:
                 self.shared.mode = "STANDBY" if armed else "DISARMED"
@@ -90,23 +123,47 @@ class PolicyController(Controller):
         self.key_t = [now, now]
         self.next_decision = now
         self._spin_ang = None
+        if self._paused_at is not None:                # back after a break in the SAME map: keep recording
+            self._paused_at = None
+            return
         self.judge.reset(); self.shaper.reset()
         self.buf = ExperienceBuffer()
         self._n_steps = 0
 
     def _end_episode(self):
+        """Control released (no notes / focus lost / disarmed). The map may just be in a break, so the episode
+        is only paused; flush_episode() closes it when the map is really over."""
         if not self.active:
             return
         self.active = False
+        self._paused_at, self._paused_ver = self._last_now, self._diff_ver
+
+    def flush_episode(self):
+        """The map is over: report it and hand the recording to the learner."""
+        self._paused_at = None
+        if not len(self.buf) and not any(self.judge.counts.values()):
+            return
         c = dict(self.judge.counts)
         acc = self.judge.accuracy()
         self.shared.log(f"map finished: acc {acc * 100:.1f}% {c['300']}/{c['100']}/{c['50']}/{c['miss']} (300/100/50/miss)")
         if self.learner is not None:
             try:
-                self.learner.finish_episode(self.buf, acc, c)
+                self.learner.finish_episode(self.buf, acc, c, {"ar": self.cfg.game.ar, "od": self.cfg.game.od,
+                                                               "map": self.map_name})
             except Exception:
                 traceback.print_exc()
         self.buf = ExperienceBuffer()
+        self.judge.reset(); self.shaper.reset()
+        self._n_steps = 0
+
+    def stop(self):
+        try:
+            if self.active:
+                self._end_episode()
+            self.flush_episode()                       # save the last map on a normal shutdown
+        except Exception:
+            traceback.print_exc()
+        super().stop()
 
     def _disengage(self, reason: str):
         super()._disengage(reason)
@@ -197,7 +254,7 @@ class PolicyController(Controller):
         r = self.shaper.step(events, cursor, objs, self.keys, follow_ok, spin_revs, spin_id, SPINNER_REV_CAP)
 
         if self.learner is not None:
-            self.buf.add(obs, act, logp, val, r)
+            self.buf.add(obs, act, logp, val, r, now, (0 in rising, 1 in rising))
         self._n_steps += 1
         if self._n_steps % 60 == 0:
             c = self.judge.counts

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import os
+import threading
 from typing import Optional
 
 import numpy as np
@@ -150,6 +151,7 @@ class PolicyRunner:
 
     def __init__(self, pc: PolicyConfig, device=None, path: Optional[str] = None):
         self.pc = pc
+        self.lock = threading.Lock()          # PolicyReloader swaps weights under this lock
         self.device = device or pick_device("auto")
         path = path or pc.weights
         if os.path.exists(path):
@@ -163,5 +165,6 @@ class PolicyRunner:
     @torch.no_grad()
     def act(self, obs: np.ndarray, deterministic=False):
         x = torch.from_numpy(obs).unsqueeze(0).to(self.device)
-        a, lp, v = self.model.act(x, deterministic, self.pc.key_temp, self.pc.move_noise_scale)
+        with self.lock:
+            a, lp, v = self.model.act(x, deterministic, self.pc.key_temp, self.pc.move_noise_scale)
         return a[0].cpu().numpy(), float(lp[0]), float(v[0])
