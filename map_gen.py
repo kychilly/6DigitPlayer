@@ -82,7 +82,8 @@ def random_beatmap(rng: np.random.Generator, seconds: float = 40.0, difficulty: 
             path = np.array([_clamp(p) for p in path])
             slides = int(rng.choice([1, 1, 1, 2, 3]))
             dur = length / (bm.slider_multiplier * 100.0) * beat * slides
-            objs.append(HitObject(SLIDER, float(path[0][0]), float(path[0][1]), t, t + dur, slides, path))
+            objs.append(HitObject(SLIDER, float(path[0][0]), float(path[0][1]), t, t + dur, slides, path,
+                                  tick_interval=beat))
             pos = path[-1] if slides % 2 == 1 else path[0]
             t += dur + beat * rng.choice([0.5, 1.0])
         else:  # spinner

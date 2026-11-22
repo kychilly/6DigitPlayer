@@ -138,6 +138,7 @@ class RewardConfig:
     r100: float = 0.5
     r50: float = 0.2
     miss: float = 0.0
+    slider_head: float = 0.3        # slider head hit in time (the slider itself is graded 300/100/50 at its end)
     stray_click: float = -0.2       # key press that hit nothing (far too early, off the circle, or no note)
     timing_bonus: float = 0.15      # extra for a tap near 0 ms (gaussian, sigma below)
     timing_sigma: float = 0.012

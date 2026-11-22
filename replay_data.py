@@ -69,6 +69,7 @@ def judge_replay(bm: Beatmap, rep: Replay) -> Judge:
     gk = held[np.clip(np.searchsorted(rep.t, g, side="right") - 1, 0, len(held) - 1)]
     for t, x, y, k in zip(g, gx, gy, gk):
         j.track(t, 0.005, (x, y), bool(k))
+    j.finalize()
     return j
 
 

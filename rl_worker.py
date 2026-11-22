@@ -143,6 +143,7 @@ def score_episode(bm, rep, t_map: np.ndarray, cfg: BotConfig):
 
     diag = {"too_early": 0, "aim_miss": 0, "no_note": 0, "hit_dts": []}
     r = np.zeros(T, np.float32)
+    hit_r = np.zeros(T, np.float32)                  # the part of r that comes from 300/100/50 judgements
     pi, ptr, live = 0, 0, []
     prev_t = t_map[0] - 1.0 / cfg.policy.hz
     for k in range(T):
@@ -165,7 +166,7 @@ def score_episode(bm, rep, t_map: np.ndarray, cfg: BotConfig):
                 if kind:
                     diag[kind] += 1
                 for e in ev:
-                    if e.kind in ("300", "100", "50"):
+                    if e.kind in ("300", "100", "50", "head") and e.obj >= 0 and e.dt != 0.0:
                         diag["hit_dts"].append(e.dt)
         events += judge.advance(t)
         dt_k = max(t - prev_t, 1e-4)
@@ -188,8 +189,9 @@ def score_episode(bm, rep, t_map: np.ndarray, cfg: BotConfig):
         need = spinner_required_revs(spin.end_time - spin.time, bm.od) if spin is not None else 0.0
         r[k] = shaper.step(events, (px[k], py[k]), sort_visible(vis), (bool(k0[k]), bool(k1[k])), follow_ok,
                            revs, spin.index if spin is not None else None, need)
+        hit_r[k] = hit_reward(events, rc)
         prev_t = t
-    judge.advance(1e9)
+    judge.finalize(1e9)
 
     c = judge.counts
     dts = np.array(diag.pop("hit_dts")) * 1000.0
@@ -201,15 +203,43 @@ def score_episode(bm, rep, t_map: np.ndarray, cfg: BotConfig):
                 slider_follow=float(sum(v[0] for v in fol) / max(sum(v[1] for v in fol), 1e-9)) if fol else None,
                 spinner_done=float(np.mean([min(a / b, 1.0) for a, b in spins])) if spins else None,
                 w300_ms=w300 * 1000)
+
+    # ---- osu!'s own score is the authority: scale the judgement rewards so this play's total matches the
+    #      300/100/50 counts osu! itself saved in the replay (the reconstruction only decides WHICH moments get it)
+    official = (int(rep.n300), int(rep.n100), int(rep.n50), int(rep.nmiss))
+    if sum(official) > 0:
+        pts = lambda a, b, cc: 300 * a + 100 * b + 50 * cc
+        mine = pts(c["300"], c["100"], c["50"])
+        ratio = float(np.clip(pts(*official[:3]) / mine, 0.5, 1.5)) if mine > 0 else 1.0
+        r = r + hit_r * (ratio - 1.0)
+        n = sum(official)
+        diag.update(official=dict(zip(("300", "100", "50", "miss"), official)),
+                    official_acc=pts(*official[:3]) / (300.0 * n), reconstructed_acc=diag["acc"], scale=ratio)
+        diag["acc"] = diag["official_acc"]
     return r, diag
+
+
+def hit_reward(events, rc) -> float:
+    """Reward from judgement events only (same numbers as RewardShaper, without the shaping)."""
+    r = 0.0
+    for e in events:
+        if e.kind in ("300", "100", "50", "head"):
+            r += {"300": rc.r300, "100": rc.r100, "50": rc.r50, "head": rc.slider_head}[e.kind]
+            if e.dt != 0.0:
+                r += rc.timing_bonus * math.exp(-(e.dt / rc.timing_sigma) ** 2)
+    return r
 
 
 def describe(diag: dict) -> list:
     """Human-readable 'what went well / what went badly' lines."""
-    c, out = diag["counts"], []
+    c, out = diag.get("official") or diag["counts"], []
     n = c["300"] + c["100"] + c["50"] + c["miss"]
-    out.append(f"acc {diag['acc'] * 100:.1f}%  300 {c['300']} | 100 {c['100']} | 50 {c['50']} | miss {c['miss']}  "
+    src = "osu! score" if "official" in diag else "acc"
+    out.append(f"{src}: {diag['acc'] * 100:.1f}%  300 {c['300']} | 100 {c['100']} | 50 {c['50']} | miss {c['miss']}  "
                f"({n} notes)")
+    if "official" in diag:
+        out.append(f"(per-note replay reconstruction: {diag['reconstructed_acc'] * 100:.1f}% - used only to decide "
+                   f"which moments earned the reward)")
     m, s, w = diag["offset_mean_ms"], diag["offset_std_ms"], diag["w300_ms"]
     if c["300"] + c["100"] + c["50"]:
         lean = "late" if m > 3 else "early" if m < -3 else "centred"
@@ -239,7 +269,8 @@ def file_md5(p) -> str:
 def reward_signature(cfg: BotConfig) -> str:
     """Changes whenever the reward settings change -> cached replay scores are recomputed."""
     import hashlib
-    return hashlib.md5(repr(sorted(vars(cfg.reward).items())).encode()).hexdigest()[:12]
+    from judge import JUDGE_VERSION
+    return hashlib.md5((repr(sorted(vars(cfg.reward).items())) + JUDGE_VERSION).encode()).hexdigest()[:12]
 
 
 def replay_to_samples(bm, rep, cfg: BotConfig):
@@ -667,7 +698,9 @@ class Worker:
             if not allow_fallback:
                 return False
             if not self.a.live_fallback:
-                self.log(f"{ep_path.name}: no replay found - skipped (use --live-fallback to learn anyway)")
+                why = {None: "osu! saved no replay (failed / quit - use NoFail)", "bad_mods": "replay has speed mods",
+                       "no_map": "beatmap not in Songs"}.get(res, "no replay")
+                self.log(f"{ep_path.name}: {why} - SKIPPED (only osu!'s own score is used for learning)")
                 return True
             c = ep["live_counts"]
             r, source = ep["rew_live"], "live"
@@ -694,7 +727,8 @@ class Worker:
         self.log(f"  reward this map: {float(r.sum()):.1f} over {len(r)} steps")
         row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "map": info["map"], "source": source,
                "ar": round(float(info["ar"]), 2), "od": round(float(info["od"]), 2),
-               "acc": round(diag["acc"], 4), **{f"n{k}": diag["counts"][k] for k in ("300", "100", "50", "miss")},
+               "acc": round(diag["acc"], 4),
+               **{f"n{k}": (diag.get("official") or diag["counts"])[k] for k in ("300", "100", "50", "miss")},
                "aim_miss": diag["aim_miss"], "too_early": diag["too_early"], "no_note": diag["no_note"],
                "offset_ms": round(diag["offset_mean_ms"], 1), "spread_ms": round(diag["offset_std_ms"], 1),
                "slider_follow": "" if diag.get("slider_follow") is None else round(diag["slider_follow"], 3),
@@ -801,10 +835,10 @@ def main():
     ap.add_argument("--replay-dirs", nargs="+", default=DEFAULT_REPLAY_DIRS)
     ap.add_argument("--extra-songs", nargs="*", default=["songs"], help="more folders with .osu files (project songs/)")
     ap.add_argument("--max-replays", type=int, default=300, help="max replays in the library (yours first, then the bot's)")
-    ap.add_argument("--study-steps", type=int, default=3000, help="study session length when the library changes")
-    ap.add_argument("--awr-steps", type=int, default=400, help="library refresher after every map (0 = off)")
+    ap.add_argument("--study-steps", type=int, default=10000, help="study session length when the library changes")
+    ap.add_argument("--awr-steps", type=int, default=1500, help="library study after every map (0 = off)")
     ap.add_argument("--awr-lr", type=float, default=3e-4)
-    ap.add_argument("--min-bot-acc", type=float, default=0.6,
+    ap.add_argument("--min-bot-acc", type=float, default=0.9,
                     help="the bot's own plays are only studied once they reach this accuracy")
     ap.add_argument("--awr-beta", type=float, default=1.0, help="lower = copy only the very best moments")
     ap.add_argument("--human-data", default="", help="(old) npz dataset mixed into PPO; the replay library replaces it")
@@ -817,8 +851,9 @@ def main():
     ap.add_argument("--warmup", type=int, default=3, help="first N maps only train the critic")
     ap.add_argument("--wait-replay", type=float, default=45.0,
                     help="seconds to wait for osu! to save the replay before falling back to the live judgement")
-    ap.add_argument("--no-live-fallback", dest="live_fallback", action="store_false",
-                    help="skip maps with no replay instead of learning from the bot's own judgement")
+    ap.add_argument("--live-fallback", dest="live_fallback", action="store_true",
+                    help="learn from the bot's OWN judgement when osu! saved no replay (off: such maps are skipped)")
+    ap.add_argument("--no-live-fallback", dest="live_fallback", action="store_false", help=argparse.SUPPRESS)
     ap.add_argument("--keep-history", type=int, default=30)
     ap.add_argument("--keep-episodes", type=int, default=50)
     ap.add_argument("--device", default="cpu")

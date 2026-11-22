@@ -35,6 +35,7 @@ class HitObject:
     end_time: float             # seconds (== time for circles)
     slides: int = 1
     path: Optional[np.ndarray] = None       # (N,2) dense polyline, arc-length resampled
+    tick_interval: float = 0.0              # seconds between slider ticks (beat / SliderTickRate)
     # filled by Beatmap.finalize
     index: int = 0
 
@@ -235,7 +236,8 @@ def parse_osu(path: str | Path) -> Beatmap:
             beat, sv = beat_and_sv(t_ms)
             dur = length / (bm.slider_multiplier * 100.0 * sv) * beat * slides / 1000.0
             bm.objects.append(HitObject(SLIDER, x, y, t_ms / 1000, t_ms / 1000 + dur, slides,
-                                        _slider_path(cp[0], pts, length)))
+                                        _slider_path(cp[0], pts, length),
+                                        tick_interval=beat / 1000.0 / max(bm.slider_tick_rate, 1e-3)))
         else:
             bm.objects.append(HitObject(CIRCLE, x, y, t_ms / 1000, t_ms / 1000))
     bm.objects.sort(key=lambda o: o.time)
